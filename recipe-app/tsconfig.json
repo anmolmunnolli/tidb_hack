@@ -1,0 +1,21 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "types": ["expo-router/types"],
+    "baseUrl": ".",
+    "paths": { "@/*": ["./*"] },
+    "jsx": "react-native",
+    "moduleResolution": "bundler",
+    "customConditions": ["react-native"]   // ✅ allowed with "bundler"
+  },
+  "include": [
+    "app",
+    "src",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx"
+  ],
+  "exclude": ["node_modules", "dist", "build"]
+}
