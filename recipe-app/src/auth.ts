@@ -34,3 +34,25 @@ export async function clearSession() {
     await AsyncStorage.multiRemove([KEY_TOKEN, KEY_USER]);
   }
 }
+
+
+
+export async function getSessionToken(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync("token");
+  } catch {
+    return null;
+  }
+}
+
+export async function authFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<Response> {
+  const token = await getSessionToken();
+  const headers = {
+    ...(init.headers || {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+  return fetch(input, { ...init, headers });
+}

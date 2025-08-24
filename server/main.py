@@ -11,6 +11,30 @@ import jwt
 from typing import Optional
 from fastapi import Header, HTTPException
 from jwt import ExpiredSignatureError, InvalidTokenError
+import re, json
+from typing import List, Dict, Any, Tuple, Set
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import pymysql
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import ssl as _ssl
+from pydantic import BaseModel
+
+# --- model/config for recommendations (match your CLI) ---
+REC_MODEL_NAME = "BAAI/bge-large-en-v1.5"   # 1024-d
+REC_MAX_LEN    = 512
+REC_USE_COSINE = True
+REC_TABLE      = os.getenv("DB_TABLE", "recipe.vector_db")
+REC_QUERY_TMPL = "Represent this sentence for searching relevant passages: {}"                    # cosine => normalize=True
+
+from typing import List
+from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+
+
 
 load_dotenv()
 
@@ -27,8 +51,6 @@ JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
 JWT_EXP_SECONDS = 7 * 24 * 3600
 
 app = FastAPI(title="TiDB Auth API (FastAPI)")
-
-
 
 
     
@@ -97,9 +119,41 @@ def check_password(password: str, hashed: str) -> bool:
     except Exception:
         return False
 
+# main.py
+
+_rec_model = None
+def get_rec_model():
+    global _rec_model
+    if _rec_model is None:
+        m = SentenceTransformer(REC_MODEL_NAME)
+        m.max_seq_length = REC_MAX_LEN
+        _rec_model = m
+    return _rec_model
+
+def vec_literal(v: np.ndarray) -> str:
+    v = np.asarray(v, dtype=np.float32)
+    return "[" + ", ".join(f"{x:.7f}" for x in v) + "]"
+
+
+# ---------- Request/Response models ----------
+from pydantic import BaseModel
+
+class RecommendIn(BaseModel):
+    query: str
+    k: int = 5
+
+class RecItem(BaseModel):
+    id: int
+    title: str | None = None
+    dist: float
+
+class RecommendOut(BaseModel):
+    items: list[RecItem]
+
+
 def sign_token(user_row: dict) -> str:
     payload = {
-        "sub": user_row["id"],
+        "sub": str(user_row["id"]),   # ← make it a string
         "email": user_row["email"],
         "first_name": user_row["first_name"],
         "last_name": user_row["last_name"],
@@ -107,6 +161,7 @@ def sign_token(user_row: dict) -> str:
         "exp": int(time.time()) + JWT_EXP_SECONDS,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
 
 def bearer_user(authorization: Optional[str] = Header(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
@@ -236,3 +291,49 @@ def update_pantry_item(item_id: int, body: PantryIn, user=Depends(bearer_user)):
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         return row
+    
+
+
+@app.post("/api/recommend", response_model=RecommendOut)
+def recommend(body: RecommendIn):
+    q = body.query.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    # 1) embed with BGE + template
+    model = get_rec_model()
+    q_text = REC_QUERY_TMPL.format(q)
+    q_vec  = model.encode(
+        [q_text],
+        normalize_embeddings=REC_USE_COSINE,
+        convert_to_numpy=True,
+        show_progress_bar=False
+    )[0]
+    q_lit = vec_literal(q_vec)
+
+    # 2) distance fn
+    dist_fn = "VEC_COSINE_DISTANCE" if REC_USE_COSINE else "VEC_L2_DISTANCE"
+
+    # 3) query TiDB
+    with get_conn() as conn, conn.cursor() as cur:
+        sql = f"""
+            SELECT id, title, {dist_fn}(embedding, %s) AS dist
+            FROM {REC_TABLE}
+            ORDER BY dist ASC
+            LIMIT %s
+        """
+        cur.execute(sql, (q_lit, body.k))
+        rows = cur.fetchall()
+
+    items = []
+    for row in rows:
+        # row can be dict if DictCursor; map safely
+        rid   = row.get("id") if isinstance(row, dict) else row[0]
+        title = row.get("title") if isinstance(row, dict) else row[1]
+        dist  = row.get("dist") if isinstance(row, dict) else row[2]
+        try:
+            dist = float(dist)
+        except Exception:
+            pass
+        items.append(RecItem(id=rid, title=title, dist=dist))
+    return RecommendOut(items=items)
