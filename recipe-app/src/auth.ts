@@ -9,6 +9,7 @@ async function secureAvailable() {
   try { return await SecureStore.isAvailableAsync(); } catch { return false; }
 }
 
+
 export async function setSession(token: string, user: any) {
   const useSecure = Platform.OS !== "web" && (await secureAvailable());
   if (useSecure) {

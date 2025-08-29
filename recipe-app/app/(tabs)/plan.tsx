@@ -1,64 +1,156 @@
 // app/(tabs)/plan.tsx
 import React, { useState } from "react";
-import { View, Text, TextInput, Pressable, FlatList, ActivityIndicator, Alert } from "react-native";
+import {
+  View,
+  Text,
+  TextInput,
+  Pressable,
+  ActivityIndicator,
+  FlatList,
+  Alert,
+  ScrollView,
+} from "react-native";
+import { router, type Href } from "expo-router";
 import { recommendMeals, type RecItem } from "../../src/recommendApi";
+import { useAuthToken } from "../../src/useAuthToken";
+
+const Pill = ({ text, tone = "#111827" }: { text: string; tone?: string }) => (
+  <View style={{ backgroundColor: tone, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999 }}>
+    <Text style={{ color: "#fff", fontWeight: "700" }}>{text}</Text>
+  </View>
+);
 
 export default function PlanScreen() {
-  const [q, setQ] = useState("");
+  const { token, loading: authLoading } = useAuthToken();
+  const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<RecItem[]>([]);
 
-  const onSearch = async () => {
-    const query = q.trim();
-    if (!query) {
-      Alert.alert("Enter a query", "e.g., 'indian potato curry less spicy'");
+  async function onRun() {
+    const q = query.trim();
+    if (!q) {
+      Alert.alert("Enter something", "Try: ‘light indian potato dinner’");
       return;
     }
     try {
       setBusy(true);
-      const res = await recommendMeals(query, 5);
+      // sensible defaults: pull 100, re-rank, return 10
+      const res = await recommendMeals({
+        query: q,
+        k: 10,
+        m: 100,
+        w1_query: 0.55,
+        w2_overlap: 0.25,
+        w3_cover: 0.20,
+        min_cover: 0.0, // set to e.g. 0.2 to require at least 20% coverage
+      });
       setItems(res);
     } catch (e: any) {
+      if (String(e?.message).toLowerCase().includes("token")) {
+        Alert.alert("Please sign in", "Your session expired. Sign in again.", [
+          { text: "OK", onPress: () => router.replace("/(auth)/login" as Href) },
+        ]);
+        return;
+      }
       Alert.alert("Error", e?.message ?? "Failed to get recommendations");
     } finally {
       setBusy(false);
     }
-  };
+  }
+
+  if (authLoading) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
+
+  if (!token) {
+    router.replace("/(auth)/login" as Href);
+    return null;
+  }
 
   return (
-    <View style={{ flex:1, padding:16, gap:12, backgroundColor:"#fff" }}>
-      <Text style={{ fontSize:22, fontWeight:"800" }}>🍽️ Meal recommendations</Text>
+    <View style={{ flex: 1, backgroundColor: "#f5f7fb", padding: 16 }}>
+      <Text style={{ fontSize: 22, fontWeight: "800", marginBottom: 10 }}>🍽️ Meal Planner</Text>
+
       <TextInput
-        placeholder='Try: "indian potato curry less spicy"'
-        value={q}
-        onChangeText={setQ}
-        autoCapitalize="none"
-        style={{ borderWidth:1, borderColor:"#e5e7eb", borderRadius:10, padding:12 }}
+        placeholder="Describe what you want (e.g., 'quick indian veg for 2 with potatoes')"
+        value={query}
+        onChangeText={setQuery}
+        style={{ borderWidth: 1, borderColor: "#e5e7eb", borderRadius: 12, padding: 12, backgroundColor: "#fff" }}
       />
-      <Pressable onPress={onSearch} style={{ backgroundColor:"#111827", padding:14, borderRadius:10 }}>
-        <Text style={{ color:"#fff", textAlign:"center", fontWeight:"700" }}>
-          {busy ? "Searching…" : "Search"}
-        </Text>
-      </Pressable>
 
-      {busy && <ActivityIndicator size="large" style={{ marginTop:10 }} />}
+      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+        <Pressable
+          onPress={onRun}
+          disabled={busy}
+          style={{ backgroundColor: "#111827", paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12, opacity: busy ? 0.6 : 1 }}
+        >
+          <Text style={{ color: "#fff", fontWeight: "700" }}>{busy ? "Searching…" : "Get ideas"}</Text>
+        </Pressable>
+      </View>
 
-      <FlatList
-        data={items}
-        keyExtractor={(x) => String(x.id)}
-        contentContainerStyle={{ gap:10, paddingVertical:8 }}
-        renderItem={({ item }) => (
-          <View style={{ borderWidth:1, borderColor:"#e5e7eb", borderRadius:12, padding:12 }}>
-            <Text style={{ fontWeight:"800", fontSize:16 }}>{item.title || "(untitled)"}</Text>
-            <Text style={{ color:"#6b7280" }}>distance: {item.dist.toFixed(4)}</Text>
-          </View>
-        )}
-        ListEmptyComponent={!busy ? (
-          <Text style={{ color:"#6b7280", marginTop:8 }}>
-            No results yet. Enter a query and tap Search.
-          </Text>
-        ) : null}
-      />
+      {busy ? (
+        <View style={{ marginTop: 20 }}>
+          <ActivityIndicator />
+        </View>
+      ) : (
+        <FlatList
+          style={{ marginTop: 14 }}
+          data={items}
+          keyExtractor={(x) => String(x.id)}
+          renderItem={({ item }) => (
+            <View
+              style={{
+                backgroundColor: "#fff",
+                borderRadius: 16,
+                padding: 14,
+                marginBottom: 12,
+                shadowColor: "#000",
+                shadowOpacity: 0.06,
+                shadowRadius: 10,
+                elevation: 2,
+              }}
+            >
+              <Text style={{ fontWeight: "800", fontSize: 16, marginBottom: 6 }}>
+                {item.title || "(untitled recipe)"}
+              </Text>
+
+              {/* Scores row */}
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                <Pill text={`score ${item.final?.toFixed(2) ?? "-"}`} tone="#111827" />
+                <Pill text={`query ${item.query_score?.toFixed(2) ?? "-"}`} tone="#2563eb" />
+                <Pill text={`overlap ${item.overlap_score?.toFixed(2) ?? "-"}`} tone="#059669" />
+                <Pill text={`cover ${item.cover_score?.toFixed(2) ?? "-"}`} tone="#7c3aed" />
+              </View>
+
+              {/* Pantry explainers */}
+              {(item.used_from_pantry?.length || item.missing?.length) ? (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 4 }}>
+                  <View style={{ flexDirection: "row", gap: 6 }}>
+                    {item.used_from_pantry?.map((t, i) => (
+                      <Pill key={`u-${item.id}-${i}`} text={t} tone="#16a34a" />
+                    ))}
+                    {item.missing?.map((t, i) => (
+                      <Pill key={`m-${item.id}-${i}`} text={t} tone="#9ca3af" />
+                    ))}
+                  </View>
+                </ScrollView>
+              ) : null}
+
+              {/* Distance for debugging */}
+              <Text style={{ color: "#6b7280", marginTop: 6 }}>dist: {item.dist?.toFixed?.(4) ?? String(item.dist)}</Text>
+            </View>
+          )}
+          ListEmptyComponent={
+            <Text style={{ color: "#6b7280", textAlign: "center", marginTop: 20 }}>
+              No ideas yet — try a different prompt.
+            </Text>
+          }
+        />
+      )}
     </View>
   );
 }

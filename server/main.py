@@ -135,20 +135,99 @@ def vec_literal(v: np.ndarray) -> str:
     return "[" + ", ".join(f"{x:.7f}" for x in v) + "]"
 
 
+
+
+
+# very common “filler” items so they don’t dominate overlap
+STOP_TOKENS = {
+    "water","salt","pepper","oil","olive oil","butter","sugar",
+    "flour","all purpose flour","ap flour"
+}
+
+_FRAC = r"[\d¼½¾⅓⅔⅛⅜⅝⅞]+"
+
+def _norm_token(s: str) -> str:
+    s = s.lower()
+    # remove numbers/fractions/units/descriptors
+    s = re.sub(rf"{_FRAC}(?:\s*{_FRAC})?", " ", s)
+    s = re.sub(r"\b(c\.|cup|cups|tsp|tbsp|teaspoon|tablespoon|stick|sticks|pkg|package|can|cans|oz|ounce|ounces|lb|lbs|g|kg|ml|l|large|small|medium)\b", " ", s)
+    s = re.sub(r"[^a-z ]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # simple plural → singular
+    if s.endswith("es") and len(s) > 3: s = s[:-2]
+    elif s.endswith("s") and len(s) > 2: s = s[:-1]
+    return s
+
+def _parse_ingredients_cell(cell) -> List[str]:
+    """ingredients column can be a JSON list of strings or a single string."""
+    if cell is None:
+        return []
+    try:
+        j = json.loads(cell)
+        raw = j if isinstance(j, list) else [cell]
+    except Exception:
+        raw = [cell]
+    toks = []
+    for t in raw:
+        tok = _norm_token(str(t))
+        if tok and tok not in STOP_TOKENS:
+            toks.append(tok)
+    return toks
+
+def _pantry_token_set(cur, user_id: int) -> Set[str]:
+    """Fetch pantry names and normalize to comparable tokens."""
+    cur.execute("SELECT name FROM pantry_items WHERE user_id=%s", (user_id,))
+    out = set()
+    for row in cur.fetchall() or []:
+        name = row["name"] if isinstance(row, dict) else row[0]
+        tok = _norm_token(name or "")
+        if tok and tok not in STOP_TOKENS:
+            out.add(tok)
+    return out
+
+def _jaccard(a: Set[str], b: Set[str]) -> float:
+    return 0.0 if not a and not b else len(a & b) / len(a | b)
+
+def _coverage(recipe_tokens: Set[str], pantry: Set[str]) -> float:
+    return 0.0 if not recipe_tokens else len(recipe_tokens & pantry) / len(recipe_tokens)
+
+def _normalize_dist_scores(dists: List[float]) -> List[float]:
+    """Convert distances to 0..1, higher is better (smaller distance = better)."""
+    if not dists:
+        return []
+    lo, hi = min(dists), max(dists)
+    if hi <= lo:
+        return [1.0] * len(dists)
+    return [1 - (d - lo) / (hi - lo) for d in dists]
+
 # ---------- Request/Response models ----------
 from pydantic import BaseModel
 
 class RecommendIn(BaseModel):
     query: str
-    k: int = 5
+    k: int = 5                   # how many to return after rerank
+    m: int = 100                 # how many to retrieve before rerank
+    # blend weights
+    w1_query: float = 0.55       # vector relevance
+    w2_overlap: float = 0.25     # pantry Jaccard
+    w3_cover: float = 0.20       # pantry coverage (# you can already make)
+
+    min_cover: float = 0.0       # e.g., 0.3 to require >=30% of recipe tokens in pantry
 
 class RecItem(BaseModel):
     id: int
-    title: str | None = None
+    title: Optional[str] = None
     dist: float
+    # extras (optional to use in UI)
+    query_score: Optional[float] = None
+    overlap_score: Optional[float] = None
+    cover_score: Optional[float] = None
+    final: Optional[float] = None
+    used_from_pantry: List[str] = []
+    missing: List[str] = []
 
 class RecommendOut(BaseModel):
-    items: list[RecItem]
+    items: List[RecItem]
 
 
 def sign_token(user_row: dict) -> str:
@@ -293,14 +372,13 @@ def update_pantry_item(item_id: int, body: PantryIn, user=Depends(bearer_user)):
         return row
     
 
-
 @app.post("/api/recommend", response_model=RecommendOut)
-def recommend(body: RecommendIn):
-    q = body.query.strip()
+def recommend(body: RecommendIn, user=Depends(bearer_user)):
+    q = (body.query or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="Empty query")
 
-    # 1) embed with BGE + template
+    # 1) Embed query with BGE template
     model = get_rec_model()
     q_text = REC_QUERY_TMPL.format(q)
     q_vec  = model.encode(
@@ -310,30 +388,67 @@ def recommend(body: RecommendIn):
         show_progress_bar=False
     )[0]
     q_lit = vec_literal(q_vec)
-
-    # 2) distance fn
     dist_fn = "VEC_COSINE_DISTANCE" if REC_USE_COSINE else "VEC_L2_DISTANCE"
 
-    # 3) query TiDB
+    # 2) Retrieve candidates (ingredients included)
     with get_conn() as conn, conn.cursor() as cur:
-        sql = f"""
-            SELECT id, title, {dist_fn}(embedding, %s) AS dist
+        cur.execute(
+            f"""
+            SELECT id, title, ingredients, {dist_fn}(embedding, %s) AS dist
             FROM {REC_TABLE}
             ORDER BY dist ASC
             LIMIT %s
-        """
-        cur.execute(sql, (q_lit, body.k))
-        rows = cur.fetchall()
+            """,
+            (q_lit, max(body.k, body.m)),
+        )
+        rows = cur.fetchall() or []
 
-    items = []
-    for row in rows:
-        # row can be dict if DictCursor; map safely
-        rid   = row.get("id") if isinstance(row, dict) else row[0]
-        title = row.get("title") if isinstance(row, dict) else row[1]
-        dist  = row.get("dist") if isinstance(row, dict) else row[2]
-        try:
-            dist = float(dist)
-        except Exception:
-            pass
-        items.append(RecItem(id=rid, title=title, dist=dist))
+        # 3) Build pantry token set for this user
+        uid = int(user["sub"]) if isinstance(user.get("sub"), str) else int(user.get("sub", 0))
+        pantry = _pantry_token_set(cur, uid)
+
+    # 4) Convert distances to query_score (0..1)
+    dists = [float(r["dist"]) for r in rows]
+    q_scores = _normalize_dist_scores(dists)
+
+    # 5) Compute overlap metrics + final score
+    items: List[RecItem] = []
+    for r, qs in zip(rows, q_scores):
+        rid = int(r["id"])
+        title = r.get("title")
+        dist = float(r["dist"])
+
+        rec_tokens = set(_parse_ingredients_cell(r.get("ingredients")))
+        rec_tokens = {t for t in rec_tokens if t not in STOP_TOKENS}
+
+        jac = _jaccard(rec_tokens, pantry)
+        cov = _coverage(rec_tokens, pantry)
+
+        final = body.w1_query * qs + body.w2_overlap * jac + body.w3_cover * cov
+
+        used = sorted(list(rec_tokens & pantry))[:10]
+        missing = sorted(list(rec_tokens - pantry))[:10]
+
+        items.append(RecItem(
+            id=rid,
+            title=title,
+            dist=dist,
+            query_score=qs,
+            overlap_score=jac,
+            cover_score=cov,
+            final=final,
+            used_from_pantry=used,
+            missing=missing,
+        ))
+
+    # 6) Optional gate by minimum coverage
+    if body.min_cover > 0:
+        gated = [x for x in items if (x.cover_score or 0) >= body.min_cover]
+        if gated:
+            items = gated
+
+    # 7) Sort by final then trim to k
+    items.sort(key=lambda x: (x.final or 0), reverse=True)
+    items = items[: max(1, body.k)]
+
     return RecommendOut(items=items)
