@@ -2,18 +2,41 @@
 import Config from "./config";
 import { getToken } from "./auth";
 
-export type RecItem = {
+
+export type RecipeDetail = {
   id: number;
   title?: string | null;
-  dist: number;
+  text_blob?: string | null;
+  ingredients?: string | null;     // raw DB text
+  directions?: string | null;      // raw DB text
+  ingredients_list?: string[];     // parsed on server
+  directions_list?: string[];      // parsed on server
+};
 
-  // Pantry-aware extras from backend (all optional to display)
-  query_score?: number;       // 0..1 (higher is better)
-  overlap_score?: number;     // Jaccard pantry vs recipe tokens
-  cover_score?: number;       // fraction of recipe tokens covered by pantry
-  final?: number;             // blended score used for ranking
-  used_from_pantry?: string[]; // a few tokens that matched
-  missing?: string[];          // a few tokens you don't have
+export async function getRecipeDetail(id: number): Promise<RecipeDetail> {
+  const token = await getToken();
+  if (!token) throw new Error("Missing auth token. Please sign in again.");
+
+  const r = await fetch(`${Config.API_BASE}/api/recipe/${id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(j?.detail || "Failed to load recipe");
+  }
+  return j as RecipeDetail;
+}
+
+export type RecItem = {
+  id: string;                  // <-- was number
+  title?: string | null;
+  dist: number;
+  query_score?: number;
+  overlap_score?: number;
+  cover_score?: number;
+  final?: number;
+  used_from_pantry?: string[];
+  missing?: string[];
 };
 
 export type RecommendParams = {
