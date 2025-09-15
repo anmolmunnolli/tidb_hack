@@ -996,7 +996,24 @@ DB_CFG = dict(
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
 JWT_EXP_SECONDS = 7 * 24 * 3600
 app = FastAPI(title="TiDB Auth API (FastAPI)")
+from fastapi.middleware.cors import CORSMiddleware
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or ["http://localhost:19006", "http://192.168.x.x:8081"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+from fastapi import Request
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print("REQ", request.method, request.url)
+    response = await call_next(request)
+    print("RES", response.status_code)
+    return response
 
 
 @app.middleware("http")
@@ -1552,6 +1569,8 @@ def update_pantry_item(item_id: int, body: PantryIn, user=Depends(bearer_user)):
 @app.post("/api/recommend", response_model=RecommendOut)
 def recommend(body: RecommendIn, user=Depends(bearer_user)):
     q = body.query.strip()
+    debug: int = Query(0, description="Return matching internals if 1"),
+
     if not q:
         raise HTTPException(status_code=400, detail="Empty query")
 
