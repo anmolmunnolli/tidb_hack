@@ -1,5 +1,8 @@
 # tidb_hack
 
+Update server/.env:
+Store your Huggingface key and Tidb credentials
+
 Create venv:
 
 ```python -m venv venv```
