@@ -168,7 +168,7 @@ export default function MealPlanScreen() {
               <View
                 key={`${group.date}-${r.id}`}
                 style={{
-                  backgroundColor: "#fff",
+                  backgroundColor: "#E5E2F5",
                   borderRadius: 16,
                   padding: 14,
                   marginBottom: 10,
@@ -229,7 +229,7 @@ export default function MealPlanScreen() {
         </View>
       )}
       ListEmptyComponent={
-        <Text style={{ color: "#6b7280", textAlign: "center", marginTop: 40 }}>
+        <Text style={{ color: "#E5E2F5", textAlign: "center", marginTop: 40 }}>
           Nothing in your meal plan yet.
         </Text>
       }

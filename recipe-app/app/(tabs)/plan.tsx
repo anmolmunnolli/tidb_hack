@@ -118,7 +118,7 @@ export default function PlanScreen() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#f5f7fb", padding: 16 }}>
+    <View style={{ flex: 1, backgroundColor: "#E5E2F5", padding: 16 }}>
       <Text style={{ fontSize: 22, fontWeight: "800", marginBottom: 10 }}>🍽️ Meal Planner</Text>
 
       <TextInput
@@ -141,7 +141,7 @@ export default function PlanScreen() {
 
         <Pressable
           onPress={() => router.push("/meal-plan" as Href)}
-          style={{ backgroundColor: "#2563eb", paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12 }}
+          style={{ backgroundColor: "#615A7F", paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12 }}
         >
           <Text style={{ color: "#fff", fontWeight: "700" }}>My Meal Plan</Text>
         </Pressable>
