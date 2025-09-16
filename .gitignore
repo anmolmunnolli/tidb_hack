@@ -38,3 +38,5 @@ yarn-error.*
 
 app-example
 server/.env
+.env
+server/.env
