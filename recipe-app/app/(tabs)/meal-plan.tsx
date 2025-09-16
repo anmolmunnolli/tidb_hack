@@ -2,13 +2,21 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { View, Text, ActivityIndicator, FlatList, Pressable, Alert } from "react-native";
 import { useFocusEffect, router, type Href } from "expo-router";
-import { deleteMealPlanItem, listMealPlan, type MealPlanItem, cookMealPlanItem } from "../../src/planApi";
+
+import {
+  deleteMealPlanItem,
+  listMealPlan,
+  type MealPlanItem,
+  cookMealPlanItem,        // <-- correct
+  type CookResponse,
+} from "../../src/mealPlanApi";
 
 type Row = MealPlanItem;
 
 export default function MealPlanScreen() {
   const [items, setItems] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
+  const [cookingId, setCookingId] = useState<number | string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -72,16 +80,68 @@ export default function MealPlanScreen() {
     }
   }
 
+  function summarizeCook(res: CookResponse) {
+    const d = res.deducted?.length ?? 0;
+    const s = res.shortages?.length ?? 0;
+    const dLines = (res.deducted || []).slice(0, 3).map(
+      (x) => `• ${x.ingredient}${x.used ? ` — used ${x.used}` : ""}`
+    );
+    const sLines = (res.shortages || []).slice(0, 3).map(
+      (x) => `• ${x.ingredient}${x.reason ? ` — ${x.reason}` : ""}`
+    );
+    return {
+      title: s > 0 ? `Shortages (${s})` : `Deducted (${d})`,
+      message:
+        (d ? `Deducted:\n${dLines.join("\n")}\n\n` : "") +
+        (s ? `Shortages:\n${sLines.join("\n")}` : ""),
+    };
+  }
+
   async function onCook(planId: string | number) {
     try {
-      console.log("[cook] calling /api/mealplan/%s/cook", planId);
-      const res = await cookMealPlanItem(planId); // <— MUST be the meal_plan.id
-      console.log("[cook] result", res);
-      Alert.alert("Cooked ✅", "Pantry deducted for this recipe.");
-      await load();
+      setCookingId(planId);
+      // 1) Preview
+      const preview = await cookMealPlanItem(planId, false);
+      const shortages = preview.shortages ?? [];
+      const needsConfirm =
+        preview.requires_confirmation === true || shortages.length > 0;
+
+      if (!needsConfirm) {
+        const { title, message } = summarizeCook(preview);
+        Alert.alert(title || "Cooked", message || "Pantry deducted.");
+        await load();
+        return;
+      }
+
+      const { title, message } = summarizeCook(preview);
+      Alert.alert(
+        title || "Shortages detected",
+        (message || "Some ingredients are short.") + "\n\nProceed anyway?",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Proceed",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                setCookingId(planId);
+                const final = await cookMealPlanItem(planId, true);
+                const sum = summarizeCook(final);
+                Alert.alert(sum.title || "Cooked ✅", sum.message || "Pantry deducted.");
+                await load();
+              } catch (e: any) {
+                Alert.alert("Cook failed", e?.message ?? "Could not deduct pantry");
+              } finally {
+                setCookingId(null);
+              }
+            },
+          },
+        ]
+      );
     } catch (e: any) {
-      console.warn("[cook] error", e);
-      Alert.alert("Cook failed", e?.message ?? "Could not deduct pantry");
+      Alert.alert("Cook failed", e?.message ?? "Could not run cook");
+    } finally {
+      setCookingId(null);
     }
   }
 
@@ -102,45 +162,70 @@ export default function MealPlanScreen() {
         <View style={{ marginBottom: 24 }}>
           <Text style={{ fontSize: 18, fontWeight: "800", marginBottom: 8 }}>{group.date}</Text>
 
-          {group.rows.map((r) => (
-            <View key={`${group.date}-${r.id}`} style={{
-              backgroundColor: "#fff", borderRadius: 16, padding: 14, marginBottom: 10,
-              shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 10, elevation: 2,
-            }}>
-              <Text style={{ fontWeight: "800", fontSize: 16, marginBottom: 6 }}>
-                {r.title || "(untitled recipe)"}
-              </Text>
+          {group.rows.map((r) => {
+            const isCooking = cookingId === r.id;
+            return (
+              <View
+                key={`${group.date}-${r.id}`}
+                style={{
+                  backgroundColor: "#fff",
+                  borderRadius: 16,
+                  padding: 14,
+                  marginBottom: 10,
+                  shadowColor: "#000",
+                  shadowOpacity: 0.06,
+                  shadowRadius: 10,
+                  elevation: 2,
+                }}
+              >
+                <Text style={{ fontWeight: "800", fontSize: 16, marginBottom: 6 }}>
+                  {r.title || "(untitled recipe)"}
+                </Text>
 
-              <Text style={{ color: "#6b7280", marginBottom: 8 }}>
-                {r.slot ? `${r.slot} · ` : ""}{r.servings ? `${r.servings} servings` : ""}
-              </Text>
+                <Text style={{ color: "#6b7280", marginBottom: 8 }}>
+                  {r.slot ? `${r.slot} · ` : ""}
+                  {r.servings ? `${r.servings} servings` : ""}
+                </Text>
 
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <Pressable
-                  onPress={() =>
-                    router.push({ pathname: "/recipe/[id]", params: { id: String(r.recipe_id) } } as Href)
-                  }
-                  style={{ backgroundColor: "#2563eb", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10 }}
-                >
-                  <Text style={{ color: "#fff", fontWeight: "700" }}>View</Text>
-                </Pressable>
+                <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+                  <Pressable
+                    onPress={() =>
+                      router.push({ pathname: "/recipe/[id]", params: { id: String(r.recipe_id) } } as Href)
+                    }
+                    style={{ backgroundColor: "#2563eb", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10 }}
+                  >
+                    <Text style={{ color: "#fff", fontWeight: "700" }}>View</Text>
+                  </Pressable>
 
-                <Pressable
-                  onPress={() => onCook(r.id)}  // <-- Use meal_plan.id here
-                  style={{ backgroundColor: "#10b981", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10 }}
-                >
-                  <Text style={{ color: "#fff", fontWeight: "700" }}>Cook</Text>
-                </Pressable>
+                  <Pressable
+                    onPress={() => onCook(r.id)}  // <-- important: use meal_plan.id
+                    disabled={isCooking}
+                    style={{
+                      backgroundColor: isCooking ? "#9CA3AF" : "#10b981",
+                      paddingVertical: 8,
+                      paddingHorizontal: 12,
+                      borderRadius: 10,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    {isCooking && <ActivityIndicator size="small" />}
+                    <Text style={{ color: "#fff", fontWeight: "700" }}>
+                      {isCooking ? "Cooking..." : "Cook"}
+                    </Text>
+                  </Pressable>
 
-                <Pressable
-                  onPress={() => onDelete(r.id)}
-                  style={{ backgroundColor: "#ef4444", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10 }}
-                >
-                  <Text style={{ color: "#fff", fontWeight: "700" }}>Delete</Text>
-                </Pressable>
+                  <Pressable
+                    onPress={() => onDelete(r.id)}
+                    style={{ backgroundColor: "#ef4444", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10 }}
+                  >
+                    <Text style={{ color: "#fff", fontWeight: "700" }}>Delete</Text>
+                  </Pressable>
+                </View>
               </View>
-            </View>
-          ))}
+            );
+          })}
         </View>
       )}
       ListEmptyComponent={

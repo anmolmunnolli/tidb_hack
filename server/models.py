@@ -16,8 +16,15 @@ class PantryOut(BaseModel):
     name: str
     qty: Optional[float] = None
     unit: Optional[str] = None
-    expires_on: Optional[str] = None   # "YYYY-MM-DD"
-    added_at: str  
+    expires_on: Optional[str] = None
+    added_at: Optional[str] = None
+
+    # NEW optional fields (must exist to pass through)
+    canonical_name: Optional[str] = None
+    norm_qty: Optional[float] = None
+    norm_unit: Optional[str] = None
+    norm_conf: Optional[float] = None
+    norm_source: Optional[str] = None
 
 class PantryIn(BaseModel):
     name: str

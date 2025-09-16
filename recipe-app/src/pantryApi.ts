@@ -9,6 +9,8 @@ export type PantryItem = {
   unit?: string | null;
   expires_on?: string | null;
   added_at: string;
+  norm_qty?: number | null;
+  norm_unit?: string | null;
 };
 
 async function authFetch(path: string, init: RequestInit = {}) {

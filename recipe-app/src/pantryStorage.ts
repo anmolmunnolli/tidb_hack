@@ -8,6 +8,8 @@ export type PantryItem = {
   category?: string;   // e.g., Produce, Dairy
   expiresOn?: string;  // ISO date
   addedAt: string;     // ISO date
+  norm_qty?: number | null;
+  norm_unit?: string | null;
 };
 
 export type ShoppingEntry = {

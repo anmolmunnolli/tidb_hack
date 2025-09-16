@@ -22,6 +22,18 @@ import {
 import { useAuthToken } from "../../src/useAuthToken";
 import { clearSession } from "../../src/auth";
 
+/** ---- NEW: local helper + type -------------------------------------------------- */
+type PantryItemWithNorm = PantryItem & {
+  norm_qty?: number | string | null;
+  norm_unit?: string | null;
+};
+
+function formatQty(q?: number | string | null) {
+  if (q === null || q === undefined || q === "") return "";
+  return typeof q === "number" ? String(q) : q;
+}
+/** ------------------------------------------------------------------------------- */
+
 function isExpiringSoon(iso?: string | null): boolean {
   if (!iso) return false;
   const d = new Date(iso).getTime();
@@ -74,7 +86,8 @@ const Card = ({ children, style }: { children: ReactNode; style?: any }) => (
 export default function PantryScreen() {
   const { token, loading: authLoading } = useAuthToken();
 
-  const [items, setItems] = useState<PantryItem[]>([]);
+  /** ---- CHANGED: typed as PantryItemWithNorm[] so TS allows norm_* keys ------ */
+  const [items, setItems] = useState<PantryItemWithNorm[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -87,11 +100,11 @@ export default function PantryScreen() {
   async function load() {
     try {
       setLoading(true);
-      const data = await fetchPantry();
+      /** Keep fetchPantry as-is; if your API already returns norm_* they’ll flow through */
+      const data = (await fetchPantry()) as unknown as PantryItemWithNorm[];
       setItems(data);
     } catch (e: any) {
       if (/not authenticated|unauthorized|401/i.test(String(e?.message))) {
-        // silent redirect to avoid alert loops
         router.replace("/(auth)/login" as Href);
         return;
       }
@@ -236,44 +249,77 @@ export default function PantryScreen() {
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
           }
           contentContainerStyle={{ paddingBottom: 80, gap: 12 }}
-          renderItem={({ item: pi }) => (
-            <Card>
-              <View
-                style={{
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <View style={{ flexShrink: 1 }}>
-                  <Text style={{ fontWeight: "700" }}>
-                    {pi.name}
-                    {pi.qty ? ` · ${pi.qty}${pi.unit ? ` ${pi.unit}` : ""}` : ""}
-                  </Text>
-                  {!!pi.expires_on && (
-                    <Text
-                      style={{
-                        color: isExpiringSoon(pi.expires_on)
-                          ? "#b91c1c"
-                          : "#6b7280",
-                      }}
-                    >
-                      Expires {new Date(pi.expires_on).toLocaleDateString()}
-                      {isExpiringSoon(pi.expires_on) ? " · soon!" : ""}
-                    </Text>
-                  )}
-                </View>
+          renderItem={({ item: pi }) => {
+            /** ---- NEW: prefer normalized values if present ------------------- */
+            const displayQty =
+              pi.norm_qty ?? (pi as any).normQty ?? pi.qty ?? null;
+            const displayUnit =
+              pi.norm_unit ?? (pi as any).normUnit ?? pi.unit ?? null;
+            const isNormalized =
+              pi.norm_qty !== undefined ||
+              (pi as any).normQty !== undefined ||
+              pi.norm_unit !== undefined ||
+              (pi as any).normUnit !== undefined;
+            /** ---------------------------------------------------------------- */
 
-                <View style={{ flexDirection: "row", gap: 8 }}>
-                  <ActionButton
-                    label="✕"
-                    tone="#ef4444"
-                    onPress={() => onDelete(pi.id)}
-                  />
+            return (
+              <Card>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <View style={{ flexShrink: 1 }}>
+                    <Text style={{ fontWeight: "700" }}>
+                      {pi.name}
+                      {displayQty
+                        ? ` · ${formatQty(displayQty)}${
+                            displayUnit ? ` ${displayUnit}` : ""
+                          }`
+                        : ""}
+                    </Text>
+
+                    {!!pi.expires_on && (
+                      <Text
+                        style={{
+                          color: isExpiringSoon(pi.expires_on)
+                            ? "#b91c1c"
+                            : "#6b7280",
+                        }}
+                      >
+                        Expires {new Date(pi.expires_on).toLocaleDateString()}
+                        {isExpiringSoon(pi.expires_on) ? " · soon!" : ""}
+                      </Text>
+                    )}
+
+                    {/* Optional: show a tiny tag if normalized */}
+                    {isNormalized && (
+                      <Text
+                        style={{
+                          marginTop: 2,
+                          color: "#065f46",
+                          fontSize: 12,
+                          fontWeight: "700",
+                        }}
+                      >
+                        normalized
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <ActionButton
+                      label="✕"
+                      tone="#ef4444"
+                      onPress={() => onDelete(pi.id)}
+                    />
+                  </View>
                 </View>
-              </View>
-            </Card>
-          )}
+              </Card>
+            );
+          }}
         />
       )}
 

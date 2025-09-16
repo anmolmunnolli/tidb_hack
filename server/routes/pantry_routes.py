@@ -1,13 +1,40 @@
 # routes/pantry_routes.py
 from fastapi import APIRouter, Depends, HTTPException
 from decimal import Decimal
+from typing import Any, Dict, List, Optional
 from models import PantryIn, PantryOut
 from auth import bearer_user
 from db import get_conn
 from agents.normalizer_agent import normalize_line_llm, NormalizedLine  # ← import the type
 
-
 router = APIRouter()
+
+def _to_float(x):
+    if x is None:
+        return None
+    if isinstance(x, Decimal):
+        return float(x)
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def _coerce_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure JSON-safe types and include normalized columns if present."""
+    if row is None:
+        return row
+    # numeric coercions
+    if "qty" in row:
+        row["qty"] = _to_float(row["qty"])
+    if "norm_qty" in row:
+        row["norm_qty"] = _to_float(row["norm_qty"])
+    if "norm_conf" in row:
+        row["norm_conf"] = _to_float(row["norm_conf"])
+    # strings can pass as-is; dates are already formatted in SQL
+    return row
+
+def _coerce_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [_coerce_row(r) for r in rows]
 
 @router.get("/api/pantry")
 def list_pantry(user=Depends(bearer_user)):
@@ -15,25 +42,30 @@ def list_pantry(user=Depends(bearer_user)):
     with get_conn() as conn, conn.cursor() as cur:
         print("[PANTRY] list for user_id:", uid)
         cur.execute(
-            """SELECT id, name, qty, unit,
-                      DATE_FORMAT(expires_on,'%%Y-%%m-%%d') AS expires_on,
-                      DATE_FORMAT(added_at,'%%Y-%%m-%%d %%H:%%i:%%s') AS added_at
-               FROM pantry_items
-               WHERE user_id=%s
-               ORDER BY added_at DESC, id DESC""",
+            """
+            SELECT
+                id,
+                name,
+                qty,
+                unit,
+                DATE_FORMAT(expires_on,'%%Y-%%m-%%d') AS expires_on,
+                DATE_FORMAT(added_at,'%%Y-%%m-%%d %%H:%%i:%%s') AS added_at,
+                -- normalized / canonical columns
+                canonical_name,
+                norm_qty,
+                norm_unit,
+                norm_conf,
+                norm_source
+            FROM pantry_items
+            WHERE user_id=%s
+            ORDER BY added_at DESC, id DESC
+            """,
             (uid,),
         )
         rows = cur.fetchall() or []
+        rows = _coerce_rows(rows)
         print("[PANTRY] list rows:", len(rows))
         return rows
-
-def _to_float(x):
-    if x is None: return None
-    if isinstance(x, Decimal): return float(x)
-    try:
-        return float(x)
-    except Exception:
-        return None
 
 @router.post("/api/pantry", response_model=PantryOut)
 def create_item(body: PantryIn, user=Depends(bearer_user)):
@@ -72,9 +104,9 @@ def create_item(body: PantryIn, user=Depends(bearer_user)):
                 _to_float(body.qty),
                 body.unit,
                 body.expires_on,
-                norm.name or None,         # ← attribute access (not .get)
-                _to_float(norm.qty),       # ← convert Decimal → float
-                norm.unit,                 # ← attribute access
+                norm.name or None,
+                _to_float(norm.qty),
+                norm.unit,
             ))
             print("[PANTRY] insert rowcount:", cur.rowcount)
             if cur.rowcount != 1:
@@ -85,12 +117,24 @@ def create_item(body: PantryIn, user=Depends(bearer_user)):
             print("[PANTRY] new_id:", new_id)
             conn.commit()
 
+            # re-select INCLUDING normalized columns
             cur.execute(
-                """SELECT id, name, qty, unit,
-                          DATE_FORMAT(expires_on,'%%Y-%%m-%%d') AS expires_on,
-                          DATE_FORMAT(added_at,'%%Y-%%m-%%d %%H:%%i:%%s') AS added_at
-                   FROM pantry_items
-                   WHERE id=%s AND user_id=%s""",
+                """
+                SELECT
+                    id,
+                    name,
+                    qty,
+                    unit,
+                    DATE_FORMAT(expires_on,'%%Y-%%m-%%d') AS expires_on,
+                    DATE_FORMAT(added_at,'%%Y-%%m-%%d %%H:%%i:%%s') AS added_at,
+                    canonical_name,
+                    norm_qty,
+                    norm_unit,
+                    norm_conf,
+                    norm_source
+                FROM pantry_items
+                WHERE id=%s AND user_id=%s
+                """,
                 (new_id, uid),
             )
             row = cur.fetchone()
@@ -98,7 +142,7 @@ def create_item(body: PantryIn, user=Depends(bearer_user)):
             if not row:
                 raise HTTPException(status_code=500, detail="Inserted but could not re-select")
 
-            return row
+            return _coerce_row(row)
 
         except HTTPException:
             raise
@@ -117,24 +161,48 @@ def update_item(item_id: int, body: PantryIn, user=Depends(bearer_user)):
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """UPDATE pantry_items
-            SET name=%s, qty=%s, unit=%s, expires_on=%s,
-                canonical_name=%s, norm_qty=%s, norm_unit=%s, norm_conf=0.9, norm_source='llm'
-            WHERE id=%s AND user_id=%s""",
+            """
+            UPDATE pantry_items
+            SET name=%s,
+                qty=%s,
+                unit=%s,
+                expires_on=%s,
+                canonical_name=%s,
+                norm_qty=%s,
+                norm_unit=%s,
+                norm_conf=0.9,
+                norm_source='llm'
+            WHERE id=%s AND user_id=%s
+            """,
             (body.name.strip(), body.qty, body.unit, body.expires_on,
-            norm_name, norm_qty, norm_unit, item_id, uid),
+             norm_name, norm_qty, norm_unit, item_id, uid),
         )
         conn.commit()
+
+        # re-select INCLUDING normalized columns
         cur.execute(
-            """SELECT id, name, qty, unit,
-                      DATE_FORMAT(expires_on,'%%Y-%%m-%%d') AS expires_on,
-                      DATE_FORMAT(added_at,'%%Y-%%m-%%d %%H:%%i:%%s') AS added_at
-               FROM pantry_items WHERE id=%s AND user_id=%s""",
+            """
+            SELECT
+                id,
+                name,
+                qty,
+                unit,
+                DATE_FORMAT(expires_on,'%%Y-%%m-%%d') AS expires_on,
+                DATE_FORMAT(added_at,'%%Y-%%m-%%d %%H:%%i:%%s') AS added_at,
+                canonical_name,
+                norm_qty,
+                norm_unit,
+                norm_conf,
+                norm_source
+            FROM pantry_items
+            WHERE id=%s AND user_id=%s
+            """,
             (item_id, uid),
         )
         row = cur.fetchone()
-        if not row: raise HTTPException(status_code=404, detail="Not found")
-        return row
+        if not row:
+            raise HTTPException(status_code=404, detail="Not found")
+        return _coerce_row(row)
 
 @router.delete("/api/pantry/{item_id}")
 def delete_item(item_id: int, user=Depends(bearer_user)):
